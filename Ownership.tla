@@ -25,26 +25,26 @@ FutureState == [
 
 (***************************************************************************
   System State:
-  
+
   * For each future, the system state stores the following information:
     - Its value, be it pending, some value, or pointer to some value in a
       distributed memory store.
     - The name of the function that will compute its value.
     - A list of futures as arguments to the function.
     - A sequence of operations to execute for the function.
-  
+
   Program State:
-  
+
   * For each future, the program state stores the set of futures that
     depend on this future for computation.
  ***************************************************************************)
- 
+
 Tup(S, n) == [1..n -> S]
 SeqOf(set, n) == UNION {Tup(set, m) : m \in 0..n}
 
 \* Valid programs must end with a return.
 ValidPrograms == {Append(seq, "return") : seq \in SeqOf({"op"}, MAX_OPS)}
- 
+
 TypeInvariant ==
     LET definedFunctions == DOMAIN functionTable IN
     /\ definedFunctions \in SUBSET FUNCTIONS
@@ -54,10 +54,11 @@ TypeInvariant ==
     /\ Cardinality(futures) <= MAX_FUTURES
     /\ nextFutureId <= MAX_FUTURES
 
+
 (***************************************************************************
   The initial state contains one function: "main".
  ***************************************************************************)
- 
+
 Init ==
     LET fn == "main" IN
     LET prog == <<"op", "return">> IN
@@ -67,6 +68,7 @@ Init ==
     /\ programState = [x \in {0} |-> {}]
     /\ futures = {0}
     /\ nextFutureId = 1
+
 
 (***************************************************************************
     Program Steps
@@ -93,7 +95,7 @@ Call(scope, fn, args, newProg) ==
     /\ systemState' =
         LET val == [value |-> "pending", fn |-> fn, args |-> args, program |-> prog] IN
         [y \in {x} |-> val] @@ systemState
- 
+
 CallSomething ==
     \E scope \in futures :
     \E f \in FUNCTIONS \ {"main"} :
@@ -162,7 +164,7 @@ ExecuteSomeProgramReturnValue ==
     \E scope \in futures :
     \E retVal \in {"value", "pointer"} :
     ExecuteProgramReturnValue(scope, retVal)
- 
+
 \* Execute one step of a program.
 ExecuteProgramOp(scope) ==
     /\ ShouldExecute(scope)
@@ -213,7 +215,7 @@ CollectValue(x) ==
     /\ OutOfScope(x)
     /\ x /= 0  \* Don't collect main. TODO: better ideas?
     /\ systemState[x].value = "pointer"
-    /\ systemState' = 
+    /\ systemState' =
         LET oldVal == systemState[x] IN
         [systemState
         EXCEPT ![x] = [value |-> "pending", fn |-> oldVal.fn,
@@ -229,7 +231,37 @@ SystemStep ==
     \/ ExecuteSomeProgramOp
     \/ CollectSomeLineage
     \/ CollectSomeValue
- 
+
+
+(***************************************************************************
+    Failures
+ ***************************************************************************)
+
+\* A value gets lost in distributed memory store.
+LoseValue(x) ==
+    /\ systemState[x].value = "pointer"
+    /\ systemState' =
+        LET oldVal == systemState[x] IN
+        [systemState
+        EXCEPT ![x] = [value |-> "pending", fn |-> oldVal.fn,
+            args |-> oldVal.args, program |-> functionTable[oldVal.fn]]]
+    /\ UNCHANGED <<functionTable, programState, futures, nextFutureId>>
+
+LoseSomeValue ==
+    \E x \in futures : LoseValue(x)
+
+LoseTask(x) ==
+    /\ x /= 0
+    /\ systemState' = [o \in futures \ {x} |-> systemState[o]]
+    /\ UNCHANGED <<functionTable, programState, futures, nextFutureId>>
+
+LoseSomeTask ==
+    \E x \in DOMAIN systemState : LoseTask(x)
+
+FailureStep ==
+    \/ LoseSomeValue
+\*    \/ LoseSomeTask
+
 
 (***************************************************************************
     Spec
@@ -238,11 +270,14 @@ SystemStep ==
 Next ==
     \/ ProgramStep
     \/ SystemStep
+    \/ FailureStep
 
 Spec ==
     /\ Init
     /\ [][Next]_vars
-    /\ WF_vars(Next)
+    /\ WF_vars(ProgramStep)
+    /\ WF_vars(SystemStep)
+    /\ WF_vars(FailureStep)
 
 
 (***************************************************************************
@@ -254,11 +289,13 @@ LineageInScope(x) ==
     \/ systemState[x].value = "value"
     \/ \A arg \in systemState[x].args : LineageInScope(arg)
 
-\* Safety Invariant
 LineageInScopeInvariant ==
     \A scope \in futures :
     \A x \in programState[scope] :
     LineageInScope(x)
+
+SafetyInvariant ==
+    /\ LineageInScopeInvariant
 
 
 (***************************************************************************
@@ -275,5 +312,5 @@ LivenessProperty ==
 
 =============================================================================
 \* Modification History
-\* Last modified Wed May 13 16:29:03 PDT 2020 by lsf
+\* Last modified Tue May 19 13:28:34 PDT 2020 by lsf
 \* Created Sat Apr 18 17:04:27 PDT 2020 by lsf
