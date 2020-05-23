@@ -25,31 +25,32 @@ FutureState == [
 
 (***************************************************************************
   System State:
-
+  
   * For each future, the system state stores the following information:
     - Its value, be it pending, some value, or pointer to some value in a
       distributed memory store.
     - The name of the function that will compute its value.
     - A list of futures as arguments to the function.
     - A sequence of operations to execute for the function.
-
+  
   Program State:
-
+  
   * For each future, the program state stores the set of futures that
     depend on this future for computation.
  ***************************************************************************)
-
+ 
 Tup(S, n) == [1..n -> S]
 SeqOf(set, n) == UNION {Tup(set, m) : m \in 0..n}
 
 \* Valid programs must end with a return.
 ValidPrograms == {Append(seq, "return") : seq \in SeqOf({"op"}, MAX_OPS)}
-
+ 
 TypeInvariant ==
     LET definedFunctions == DOMAIN functionTable IN
     /\ definedFunctions \in SUBSET FUNCTIONS
     /\ functionTable \in [definedFunctions -> ValidPrograms]
-    /\ systemState \in [futures -> FutureState]
+    /\ \E futureSubset \in SUBSET futures :
+        systemState \in [futureSubset -> FutureState]
     /\ programState \in [futures -> SUBSET futures]
     /\ Cardinality(futures) <= MAX_FUTURES
     /\ nextFutureId <= MAX_FUTURES
@@ -58,7 +59,7 @@ TypeInvariant ==
 (***************************************************************************
   The initial state contains one function: "main".
  ***************************************************************************)
-
+ 
 Init ==
     LET fn == "main" IN
     LET prog == <<"op", "return">> IN
@@ -86,16 +87,12 @@ Call(scope, fn, args, newProg) ==
     /\ functionTable' = [f \in {fn} |-> prog] @@ functionTable
     /\ futures' = futures \union {x}
     /\ nextFutureId' = x + 1
-    /\ programState' = [
-        o \in futures' |->
-        IF o \in futures THEN
-            IF o = scope THEN programState[o] \union {x} ELSE programState[o]
-        ELSE {}
-       ]
+    /\ programState' =
+        [y \in {x} |-> {}] @@ [programState EXCEPT ![scope] = programState[scope] \union {x}]
     /\ systemState' =
-        LET val == [value |-> "pending", fn |-> fn, args |-> args, program |-> prog] IN
-        [y \in {x} |-> val] @@ systemState
-
+        LET state == [value |-> "pending", fn |-> fn, args |-> args, program |-> prog] IN
+        [y \in {x} |-> state] @@ systemState
+ 
 CallSomething ==
     \E scope \in futures :
     \E f \in FUNCTIONS \ {"main"} :
@@ -164,7 +161,7 @@ ExecuteSomeProgramReturnValue ==
     \E scope \in futures :
     \E retVal \in {"value", "pointer"} :
     ExecuteProgramReturnValue(scope, retVal)
-
+ 
 \* Execute one step of a program.
 ExecuteProgramOp(scope) ==
     /\ ShouldExecute(scope)
@@ -213,9 +210,9 @@ OutOfScope(x) == ~(
 \* Remove x from the program state table.
 CollectValue(x) ==
     /\ OutOfScope(x)
-    /\ x /= 0  \* Don't collect main. TODO: better ideas?
+    /\ x /= 0  \* Don't collect main.
     /\ systemState[x].value = "pointer"
-    /\ systemState' =
+    /\ systemState' = 
         LET oldVal == systemState[x] IN
         [systemState
         EXCEPT ![x] = [value |-> "pending", fn |-> oldVal.fn,
@@ -231,16 +228,16 @@ SystemStep ==
     \/ ExecuteSomeProgramOp
     \/ CollectSomeLineage
     \/ CollectSomeValue
-
+ 
 
 (***************************************************************************
-    Failures
+    Failures and Recovery
  ***************************************************************************)
 
 \* A value gets lost in distributed memory store.
 LoseValue(x) ==
     /\ systemState[x].value = "pointer"
-    /\ systemState' =
+    /\ systemState' = 
         LET oldVal == systemState[x] IN
         [systemState
         EXCEPT ![x] = [value |-> "pending", fn |-> oldVal.fn,
@@ -250,18 +247,23 @@ LoseValue(x) ==
 LoseSomeValue ==
     \E x \in futures : LoseValue(x)
 
-LoseTask(x) ==
+\* TODO: the caller of this future should detect that this task is gone and respawn one.
+LoseAndRecoverTask(x) ==
+    LET fn == systemState[x].fn IN
+    LET args == systemState[x].args IN
+    LET prog == functionTable[fn] IN
     /\ x /= 0
-    /\ systemState' = [o \in futures \ {x} |-> systemState[o]]
+    /\ systemState' =
+        LET state == [value |-> "pending", fn |-> fn, args |-> args, program |-> prog] IN
+        [systemState EXCEPT ![x] = state] 
     /\ UNCHANGED <<functionTable, programState, futures, nextFutureId>>
 
-LoseSomeTask ==
-    \E x \in DOMAIN systemState : LoseTask(x)
+LoseAndRecoverSomeTask ==
+    \E x \in DOMAIN systemState : LoseAndRecoverTask(x)
 
 FailureStep ==
     \/ LoseSomeValue
-\*    \/ LoseSomeTask
-
+    \/ LoseAndRecoverSomeTask
 
 (***************************************************************************
     Spec
@@ -286,8 +288,9 @@ Spec ==
 
 RECURSIVE LineageInScope(_)
 LineageInScope(x) ==
-    \/ systemState[x].value = "value"
-    \/ \A arg \in systemState[x].args : LineageInScope(arg)
+    /\ x \in DOMAIN systemState
+    /\ \/ systemState[x].value = "value"
+       \/ \A arg \in systemState[x].args : LineageInScope(arg)
 
 LineageInScopeInvariant ==
     \A scope \in futures :
@@ -312,5 +315,5 @@ LivenessProperty ==
 
 =============================================================================
 \* Modification History
-\* Last modified Tue May 19 13:28:34 PDT 2020 by lsf
+\* Last modified Sat May 23 15:17:04 PDT 2020 by lsf
 \* Created Sat Apr 18 17:04:27 PDT 2020 by lsf
