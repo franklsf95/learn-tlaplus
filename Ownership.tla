@@ -247,7 +247,8 @@ LoseValue(x) ==
 LoseSomeValue ==
     \E x \in futures : LoseValue(x)
 
-\* TODO: the caller of this future should detect that this task is gone and respawn one.
+\* A task gets lost and respawned. This is an atomic step in this spec
+\* because otherwise the LineageInScopeInvariant would be violated.
 LoseAndRecoverTask(x) ==
     LET fn == systemState[x].fn IN
     LET args == systemState[x].args IN
@@ -315,5 +316,5 @@ LivenessProperty ==
 
 =============================================================================
 \* Modification History
-\* Last modified Sat May 23 15:17:04 PDT 2020 by lsf
+\* Last modified Sat May 23 15:20:32 PDT 2020 by lsf
 \* Created Sat Apr 18 17:04:27 PDT 2020 by lsf
