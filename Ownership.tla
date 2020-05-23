@@ -11,6 +11,19 @@ vars == <<functionTable, systemState, programState, futures, nextFutureId>>
 
 ----------------------------------------------------------------------------
 
+\* Src: https://www.hillelwayne.com/post/tla-messages/
+Tup(S, n) == [1..n -> S]
+SeqOf(set, n) == UNION {Tup(set, m) : m \in 0..n}
+
+\* Src: https://github.com/tlaplus/CommunityModules/blob/master/modules/SequencesExt.tla
+IsInjective(s) ==
+  \A i, j \in DOMAIN s: (s[i] = s[j]) => (i = j)
+
+SetToSeq(S) ==
+  CHOOSE f \in [1..Cardinality(S) -> S] : IsInjective(f)
+
+----------------------------------------------------------------------------
+
 OPS == {"op", "return"}
 
 FutureValue == {"pending", "value", "pointer"}
@@ -38,9 +51,6 @@ FutureState == [
   * For each future, the program state stores the set of futures that
     depend on this future for computation.
  ***************************************************************************)
- 
-Tup(S, n) == [1..n -> S]
-SeqOf(set, n) == UNION {Tup(set, m) : m \in 0..n}
 
 \* Valid programs must end with a return.
 ValidPrograms == {Append(seq, "return") : seq \in SeqOf({"op"}, MAX_OPS)}
@@ -246,17 +256,28 @@ LoseValue(x) ==
 
 LoseSomeValue ==
     \E x \in futures : LoseValue(x)
+    
+RespawnTask(sys, x) ==
+    LET fn == sys[x].fn IN
+    LET args == sys[x].args IN
+    LET prog == functionTable[fn] IN
+    LET state == [value |-> "pending", fn |-> fn, args |-> args, program |-> prog] IN
+    [sys EXCEPT ![x] = state]
+
+RECURSIVE RespawnTasks(_, _)
+RespawnTasks(sys, xs) ==
+    IF Len(xs) = 0 THEN sys ELSE
+    LET x == Head(xs) IN
+    LET children == programState[x] IN
+    LET xs_ == Tail(xs) \o SetToSeq(children) IN
+    RespawnTasks(RespawnTask(sys, x), xs_)
 
 \* A task gets lost and respawned. This is an atomic step in this spec
 \* because otherwise the LineageInScopeInvariant would be violated.
+\* All descendants of this task also gets respawned due to fate-sharing.
 LoseAndRecoverTask(x) ==
-    LET fn == systemState[x].fn IN
-    LET args == systemState[x].args IN
-    LET prog == functionTable[fn] IN
     /\ x /= 0
-    /\ systemState' =
-        LET state == [value |-> "pending", fn |-> fn, args |-> args, program |-> prog] IN
-        [systemState EXCEPT ![x] = state] 
+    /\ systemState' = RespawnTasks(systemState, <<x>>)
     /\ UNCHANGED <<functionTable, programState, futures, nextFutureId>>
 
 LoseAndRecoverSomeTask ==
@@ -316,5 +337,5 @@ LivenessProperty ==
 
 =============================================================================
 \* Modification History
-\* Last modified Sat May 23 15:20:32 PDT 2020 by lsf
+\* Last modified Sat May 23 16:01:17 PDT 2020 by lsf
 \* Created Sat Apr 18 17:04:27 PDT 2020 by lsf
