@@ -3,68 +3,75 @@ EXTENDS FiniteSets, Integers, Sequences, TLC
 
 CONSTANTS MAX_CHILDREN, MAX_CALL_DEPTH
 
-VARIABLES taskTable, schedulerInbox, taskInbox
+VARIABLES nextWorkerId, workerIds, taskTable, objectStore, schedulerInbox, taskInbox
 
-vars == <<taskTable, schedulerInbox, taskInbox>>
+vars == <<nextWorkerId, workerIds, taskTable, objectStore, schedulerInbox, taskInbox>>
 
 ----------------------------------------------------------------------------
 
-MULTIPLIER == 100
+TASK_ID_SEP == 100
+WORKER_ID_SEP == 1000
+Task == 0..(TASK_ID_SEP ^ MAX_CALL_DEPTH)
+Globalize(scope, x) == scope * TASK_ID_SEP + x
 
-Task == 0..(MULTIPLIER ^ MAX_CALL_DEPTH)
+\* Program Return Values
 
-FutureValue == {"pending", "value", "pointer", "collected"}
+WorkerID == Nat
+PENDING == -1
+COLLECTED == -2
+INLINE_VALUE == -WORKER_ID_SEP
+FutureValue == WorkerID \union {PENDING, COLLECTED, INLINE_VALUE}
+IsValueReady(x) == x \notin {PENDING, COLLECTED}
+IsValueWorkerID(x) == x \in WorkerID
 
-IsValueReady(x) ==
-    x \notin {"pending", "collected"}
+\* Program Steps
 
-Operation == {"CALL", "GET", "DELETE", "RETURN", "IDLE", "TERMINATED"}
-
+Operation == {"CALL", "GET", "DELETE", "RETURN", "TERMINATED"}
 CALL(x, args) == <<"CALL", x, args>>
-
 GET(x) == <<"GET", x>>
-
 DELETE(x) == <<"DELETE", x>>
-
 RETURN == <<"RETURN">>
-
-IDLE == <<"IDLE">>
-
 TERMINATED == <<"TERMINATED">>
 
 Instruction == Operation \X Seq(Task)
 
 TaskSpec == [
-    owner : Task,
-    future : Task,
-    args : SUBSET Task
+    owner: Task,
+    future: Task,
+    args: SUBSET Task
 ]
 
 FutureState == [
     inScope: BOOLEAN,
     valueGotten: BOOLEAN,
     value: FutureValue,
+    workerId: WorkerID,
     taskSpec: TaskSpec
 ]
 
 TaskState == [
     owner: Task,
+    workerId: WorkerID,
     executedSteps: Seq(Instruction),
-    nextStep: Instruction,
+    nextSteps: Instruction,
     nextChildId: Task,
     children: [SUBSET Task -> FutureState]
 ]
 
+IsIdle(taskState) == Len(taskState.nextSteps) = 0
+
 IsTerminated(taskState) ==
-    taskState.nextStep[1] = "TERMINATED"
+    /\ Len(taskState.nextSteps) > 0
+    /\ taskState.nextSteps[1][1] = "TERMINATED"
 
-Globalize(scope, x) ==
-    scope * MULTIPLIER + x
+\* Messages that a Task Inbox can receive
 
+WorkerFailedMessages == {"FAILED"} \X WorkerID
+TaskReturnedMessages == {"RETURNED"} \X Task \X WorkerID
+TaskScheduledMessages == {"SCHEDULED"} \X TaskSpec \X WorkerID
+Messages == UNION { WorkerFailedMessages, TaskReturnedMessages, TaskScheduledMessages }
 
-(***************************************************************************
-  Type Invariants
- ***************************************************************************)
+\* Type Invariants
 
 \* Ownership Table: [Task -> TaskState]
 TaskTableTypeOK ==
@@ -72,18 +79,24 @@ TaskTableTypeOK ==
     /\ t \in Task
 \*    /\ taskTable[t] \in TaskState
 
+ObjectStoreTypeOK ==
+    \A w \in DOMAIN objectStore :
+    /\ w \in workerIds
+    /\ objectStore[w] \in Task
+
 SchedulerInboxTypeOK ==
     \* Scheduler's Inbox is a sequence of TaskSpec.
     schedulerInbox \in Seq(TaskSpec)
 
-\* Each owner's inbox is a sequence of TaskSpec.
+\* Each owner's inbox is a sequence of Messages.
 TaskInboxTypeOK ==
     \A t \in DOMAIN taskInbox :
     /\ t \in Task
-    /\ taskInbox[t] \in Seq(TaskSpec)
- 
+    /\ taskInbox[t] \in Seq(Messages)
+
 TypeOK ==
     /\ TaskTableTypeOK
+    /\ ObjectStoreTypeOK
     /\ SchedulerInboxTypeOK
     /\ TaskInboxTypeOK
 
@@ -91,25 +104,32 @@ TypeOK ==
 (***************************************************************************
   The initial state contains one function: "main".
  ***************************************************************************)
- 
-NewTaskState(owner) ==
-    [owner |-> owner, executedSteps |-> <<>>, nextStep |-> IDLE, nextChildId |-> 1, children |-> <<>>]
+
+NewTaskState(owner, workerId) ==
+    [owner |-> owner, workerId |-> workerId, executedSteps |-> <<>>, nextSteps |-> <<>>, nextChildId |-> 1, children |-> <<>>]
 
 Init ==
-    /\ taskTable = [x \in {0} |-> NewTaskState(0)]
+    /\ nextWorkerId = WORKER_ID_SEP
+    /\ workerIds = {0}
+    /\ taskTable = [x \in {0} |-> NewTaskState(0, 0)]
+    /\ objectStore = <<>>
     /\ schedulerInbox = <<>>
     /\ taskInbox = [x \in {0} |-> <<>>]
 
+SendMessage(inbox, receiver, msg) ==
+    IF receiver \notin DOMAIN inbox THEN inbox ELSE
+    [taskInbox EXCEPT ![receiver] = Append(inbox[receiver], msg)]
 
 (***************************************************************************
     Executing Program Steps
  ***************************************************************************)
 
-\* Add the instruction into "executed steps" and reset the next instruction
-\* to be IDLE.
+\* Pop the current instruction from nextSteps and append it to executedSteps.
 FinishExecuting(taskState) ==
-    LET executedSteps_== Append(taskState.executedSteps, taskState.nextStep) IN
-    [[taskState EXCEPT !.executedSteps = executedSteps_] EXCEPT !.nextStep = IDLE]
+    LET nextSteps == taskState.nextSteps IN
+    LET inst == Head(nextSteps) IN
+    LET executedSteps_== Append(taskState.executedSteps, inst) IN
+    [[taskState EXCEPT !.executedSteps = executedSteps_] EXCEPT !.nextSteps = Tail(nextSteps)]
 
 \* Call a function, creating a new future and adding it to the ownership table.
 \* Then send the task to the scheduler's queue for scheduling.
@@ -120,14 +140,13 @@ CallAndSchedule(scope, taskState, inst) ==
     LET task == [owner |-> scope, future |-> x, args |-> args] IN
     /\ x \notin DOMAIN taskTable
     /\ x \notin DOMAIN taskTable[scope].children
-    /\ schedulerInbox' =
-        Append(schedulerInbox, task)
+    /\ schedulerInbox' = Append(schedulerInbox, task)
     /\ taskTable' =
-       LET child == [inScope |-> TRUE, valueGotten |-> FALSE, value |-> "pending", taskSpec |-> task] IN
+       LET child == [inScope |-> TRUE, valueGotten |-> FALSE, value |-> PENDING, workerId |-> PENDING, taskSpec |-> task] IN
        LET children_ == [y \in {x} |-> child] @@ taskState.children IN
        LET taskState_ == [FinishExecuting(taskState) EXCEPT !.children = children_] IN
        [taskTable EXCEPT ![scope] = taskState_]
-    /\ UNCHANGED <<taskInbox>>
+    /\ UNCHANGED <<nextWorkerId, workerIds, objectStore, taskInbox>>
 
 \* Wait on a future for its task to finish, and get its value.
 Get(scope, taskState, inst) ==
@@ -135,12 +154,12 @@ Get(scope, taskState, inst) ==
     LET entry == taskState.children[x] IN
     /\ entry.inScope
     /\ ~entry.valueGotten
-    /\ entry.value /= "pending"
+    /\ IsValueReady(entry.value)
     /\ taskTable' =
         LET futureState_ == [entry EXCEPT !.valueGotten = TRUE] IN
         LET taskState_ == [FinishExecuting(taskState) EXCEPT !.children[x] = futureState_] IN
         [taskTable EXCEPT ![scope] = taskState_]
-    /\ UNCHANGED <<schedulerInbox, taskInbox>>
+    /\ UNCHANGED <<nextWorkerId, workerIds, objectStore, schedulerInbox, taskInbox>>
 
 \* Remove a future from current scope. This does not remove its task spec.
 Delete(scope, taskState, inst) ==
@@ -149,28 +168,29 @@ Delete(scope, taskState, inst) ==
         LET futureState_ == [taskTable[scope].children[x] EXCEPT !.inScope = FALSE] IN
         LET taskState_ == [FinishExecuting(taskState) EXCEPT !.children[x] = futureState_] IN
         [taskTable EXCEPT ![scope] = taskState_]
-    /\ UNCHANGED <<schedulerInbox, taskInbox>>
+    /\ UNCHANGED <<nextWorkerId, workerIds, objectStore, schedulerInbox, taskInbox>>
 
 \* Finish execution. Return the value to its owner.
-\* TODO: set all of its children's "inScope" flags to false.
+\* TODO: set all of its children's "inScope" flags to false?
 Return(scope, taskState) ==
-    \E retVal \in {"value", "pointer"} :
+    \* The return value could either be a literal, or stored in the worker's object store.
+    \E retVal \in {INLINE_VALUE, taskState.workerId} :
     LET owner == taskTable[scope].owner IN
-    /\ LET taskTable_ ==
-        [y \in {scope} |-> [FinishExecuting(taskState) EXCEPT !.nextStep = TERMINATED]]
+    /\ taskTable' =
+        [y \in {scope} |-> [FinishExecuting(taskState) EXCEPT !.nextSteps = <<TERMINATED>>]]
         @@ taskTable
-       IN
-        taskTable' =
-        \* owner = scope is a special case for the main function (0).
-        IF owner \notin DOMAIN taskTable \/ owner = scope THEN taskTable_ ELSE
-        LET ownerState == taskTable[owner] IN
-\*        IF scope \notin DOMAIN ownerState.children THEN taskTable_ ELSE
-        [y \in {owner} |-> [ownerState EXCEPT !.children[scope].value = retVal]]
-        @@ taskTable_
-    /\ UNCHANGED <<schedulerInbox, taskInbox>>
+    /\ objectStore' =
+        IF retVal = INLINE_VALUE THEN objectStore ELSE
+        [y \in {retVal} |-> scope] @@ objectStore
+    /\ taskInbox' =
+        \* (owner = scope) is a special case for the main function (0).
+        IF owner \notin DOMAIN taskTable \/ owner = scope THEN taskInbox ELSE
+        LET msg == <<"RETURNED", scope, taskState.workerId>> IN
+        SendMessage(taskInbox, owner, msg)
+    /\ UNCHANGED <<nextWorkerId, workerIds, schedulerInbox>>
 
 ExecuteProgramStep(scope, taskState) ==
-    LET inst == taskState.nextStep IN
+    LET inst == taskState.nextSteps[1] IN
     LET op == Head(inst) IN
     CASE op = "CALL" -> CallAndSchedule(scope, taskState, inst)
       [] op = "GET" -> Get(scope, taskState, inst)
@@ -181,13 +201,14 @@ ExecuteProgramStep(scope, taskState) ==
 ExecuteSomeProgramStep ==
     \E scope \in DOMAIN taskTable :
     LET taskState == taskTable[scope] IN
-    /\ taskState.nextStep[1] \notin {"IDLE", "TERMINATED"}
+    /\ ~IsTerminated(taskState)
+    /\ ~IsIdle(taskState)
     /\ ExecuteProgramStep(scope, taskState)
 
 (***************************************************************************
     Submitting Program Steps
  ***************************************************************************)
- 
+
 \* Generate all possible instructions given a task state.
 PossibleNextSteps(scope, taskState) ==
     LET children == DOMAIN taskState.children IN
@@ -195,19 +216,18 @@ PossibleNextSteps(scope, taskState) ==
     UNION {
         IF
         \/ taskState.nextChildId >= MAX_CHILDREN
-        \/ scope >= MULTIPLIER ^ (MAX_CALL_DEPTH - 1)
-        THEN {}
-        ELSE
+        \/ scope >= TASK_ID_SEP ^ (MAX_CALL_DEPTH - 1)
+        THEN {} ELSE
         LET x == taskState.nextChildId IN
         \* CALL with any set of arguments.
         { CALL(x, args) : args \in SUBSET inScopes },
-        
+
         \* GET anything that has not been gotten yet.
         { GET(x) : x \in {x \in inScopes : ~taskState.children[x].valueGotten} },
-        
+
         \* DELETE anything that is in scope.
         { DELETE(x) : x \in inScopes },
-        
+
         \* RETURN.
         { RETURN }
     }
@@ -215,18 +235,19 @@ PossibleNextSteps(scope, taskState) ==
 \* Submit a program step according to the current task state.
 SubmitProgramStep(scope, taskState) ==
     \E inst \in PossibleNextSteps(scope, taskState) :
-    /\ taskTable' = 
+    /\ taskTable' =
        LET taskState_ == IF inst[1] = "CALL"
          THEN [taskState EXCEPT !.nextChildId = taskState.nextChildId + 1]
          ELSE taskState IN
-       [y \in {scope} |-> [taskState_ EXCEPT !.nextStep = inst]]
+       LET nextSteps_ == Append(taskState.nextSteps, inst) IN
+       [y \in {scope} |-> [taskState_ EXCEPT !.nextSteps = nextSteps_]]
        @@ taskTable
-    /\ UNCHANGED <<schedulerInbox, taskInbox>>
+    /\ UNCHANGED <<nextWorkerId, workerIds, objectStore, schedulerInbox, taskInbox>>
 
 SubmitSomeProgramStep ==
     \E scope \in DOMAIN taskTable :
     LET taskState == taskTable[scope] IN
-    /\ taskState.nextStep[1] = "IDLE"
+    /\ IsIdle(taskState)
     /\ SubmitProgramStep(scope, taskState)
 
 ProgramStep ==
@@ -234,7 +255,7 @@ ProgramStep ==
     \/ SubmitSomeProgramStep
 
 (***************************************************************************
-    System Steps: Task Creation
+    System Steps: Scheduler Actions
  ***************************************************************************)
 
 \* Task Creation Step 2:
@@ -247,27 +268,11 @@ ScheduleTask ==
     /\ schedulerInbox' = Tail(schedulerInbox)
     /\ LET task == Head(schedulerInbox) IN
        LET owner == task.owner IN
-       taskInbox' = [taskInbox EXCEPT ![owner] = Append(taskInbox[owner], task)]
-    /\ UNCHANGED <<taskTable>>
-
-\* Task Creation Step 3:
-\* Owner takes a task from its "scheduled" queue and launch it,
-\* provided that all of its arguments are ready.
-\* TODO: and when someone is depending on it??
-LaunchTask(scope) ==
-    LET ownerQueue == taskInbox[scope] IN
-    LET task == Head(ownerQueue) IN
-    /\ \A a \in task.args : IsValueReady(taskTable[scope].children[a].value)
-    /\ taskTable' =
-       [y \in {task.future} |-> NewTaskState(task.owner)] @@ taskTable
-    /\ taskInbox' =
-       [y \in {task.future} |-> <<>>] @@ [taskInbox EXCEPT ![scope] = Tail(ownerQueue)]
-    /\ UNCHANGED <<schedulerInbox>>
-
-LaunchSomeTask ==
-    \E scope \in DOMAIN taskInbox :
-    /\ Len(taskInbox[scope]) > 0
-    /\ LaunchTask(scope)
+       LET msg == <<"SCHEDULED", task, nextWorkerId>> IN
+       taskInbox' = SendMessage(taskInbox, owner, msg)
+    /\ workerIds' = workerIds \union {nextWorkerId}
+    /\ nextWorkerId' = nextWorkerId + WORKER_ID_SEP
+    /\ UNCHANGED <<taskTable, objectStore>>
 
 (***************************************************************************
     System Steps: Garbage Collection
@@ -280,7 +285,9 @@ CollectTaskState(scope) ==
     /\ Cardinality(DOMAIN taskState.children) = 0
     /\ taskTable' =
        [y \in DOMAIN taskTable \ {scope} |-> taskTable[y]]
-    /\ UNCHANGED <<schedulerInbox, taskInbox>>
+    /\ taskInbox' =
+       [y \in DOMAIN taskInbox \ {scope} |-> taskInbox[y]]
+    /\ UNCHANGED <<nextWorkerId, workerIds, objectStore, schedulerInbox>>
 
 CollectSomeTaskState ==
     \E x \in DOMAIN taskTable :
@@ -292,12 +299,12 @@ OutOfLineageScope(scope, x) ==
     LET children == taskState.children IN
     ~(
         \* Do not collect lineage of a task that hasn't returned yet.
-        \/ children[x].value = "pending"
+        \/ children[x].value = PENDING
         \/ children[x].inScope
         \/ \E y \in DOMAIN children :
            LET futureState == children[y] IN
            /\ x \in futureState.taskSpec.args
-           /\ futureState.value \in {"pending", "pointer", "collected"}
+           /\ futureState.value \in ({PENDING, COLLECTED} \union WorkerID)
     )
 
 \* Remove x's entry from its owner's task table entry.
@@ -309,7 +316,7 @@ CollectLineage(scope, x) ==
        LET children_ == [y \in DOMAIN children \ {x} |-> children[y]] IN
        LET taskState_ == [taskState EXCEPT !.children = children_] IN
        [y \in {scope} |-> taskState_] @@ taskTable
-    /\ UNCHANGED <<schedulerInbox, taskInbox>>
+    /\ UNCHANGED <<nextWorkerId, workerIds, objectStore, schedulerInbox, taskInbox>>
 
 CollectSomeLineage ==
     \E scope \in DOMAIN taskTable :
@@ -317,14 +324,14 @@ CollectSomeLineage ==
     CollectLineage(scope, x)
 
 \* Checks if no one depends on x's value.
-OutOfScope(scope, x) == 
+OutOfScope(scope, x) ==
     LET taskState == taskTable[scope] IN
     LET children == taskState.children IN
     ~(
         \/ children[x].inScope
         \/ \E y \in DOMAIN children :
            LET futureState == children[y] IN
-           /\ futureState.value = "pending"
+           /\ futureState.value = PENDING
            /\ x \in futureState.taskSpec.args
     )
 
@@ -332,60 +339,124 @@ OutOfScope(scope, x) ==
 CollectValue(scope, x) ==
     LET taskState == taskTable[scope] IN
     LET children == taskState.children IN
+    LET workerId == children[x].value IN
     /\ OutOfScope(scope, x)
-    /\ children[x].value = "pointer"
+    /\ IsValueWorkerID(workerId)
     /\ taskTable' =
-       LET children_ == [y \in {x} |-> [children[x] EXCEPT !.value = "collected"]] @@ children IN
+       LET children_ == [y \in {x} |-> [children[x] EXCEPT !.value = COLLECTED]] @@ children IN
        LET taskState_ == [taskState EXCEPT !.children = children_] IN
        [y \in {scope} |-> taskState_] @@ taskTable
-    /\ UNCHANGED <<schedulerInbox, taskInbox>>
+    /\ objectStore' = [y \in DOMAIN objectStore \ {workerId} |-> objectStore[y]]
+    /\ UNCHANGED <<nextWorkerId, workerIds, schedulerInbox, taskInbox>>
 
 CollectSomeValue ==
     \E scope \in DOMAIN taskTable :
     \E x \in DOMAIN taskTable[scope].children :
     CollectValue(scope, x)
 
+(***************************************************************************
+    System Steps: Message Handling
+ ***************************************************************************)
+
+MarkMessageAsRead(inbox, scope) ==
+    [inbox EXCEPT ![scope] = Tail(inbox[scope])]
+
+\* TODO: ResubmitTask()
+
+\* Task Creation Step 3:
+\* Owner takes a task from its "scheduled" queue and launch it,
+\* provided that all of its arguments are ready.
+OnTaskScheduled(scope, msg) ==
+    LET task == msg[2] IN
+    LET workerId == msg[3] IN
+    IF workerId \notin workerIds THEN
+    \* The worker has failed and we need to resubmit this task.
+    /\ taskTable' = taskTable
+    /\ schedulerInbox' = Append(schedulerInbox, task)
+    /\ taskInbox' = MarkMessageAsRead(taskInbox, scope)
+    /\ UNCHANGED <<nextWorkerId, workerIds, objectStore>>
+    ELSE
+    /\ \A a \in task.args : IsValueReady(taskTable[scope].children[a].value)
+    /\ taskTable' =
+       [y \in {task.future} |-> NewTaskState(task.owner, workerId)]
+       @@ [taskTable EXCEPT ![scope].children[task.future].workerId = workerId]
+    /\ schedulerInbox' = schedulerInbox
+    /\ taskInbox' =
+       [y \in {task.future} |-> <<>>] @@ MarkMessageAsRead(taskInbox, scope)
+    /\ UNCHANGED <<nextWorkerId, workerIds, objectStore>>
+
+\* The owner checks if any of its children task is on the failed worker.
+\* If so, resubmit the task.
+OnWorkerFailed(scope, msg) ==
+    LET id == msg[2] IN
+    LET children == IF scope \in DOMAIN taskTable THEN taskTable[scope].children ELSE <<>> IN
+    LET failedFutures == {x \in DOMAIN children : children[x].workerId = id} IN
+    LET failedTasks == {children[x].taskSpec : x \in failedFutures} IN
+    /\ schedulerInbox' =
+        IF Cardinality(failedTasks) = 0 THEN schedulerInbox ELSE
+        \* TODO: figure out how to convert a set to a sequence; for now just choose the singleton.
+        LET failedTask == CHOOSE t \in failedTasks : TRUE IN
+        Append(schedulerInbox, failedTask)
+    /\ taskInbox' = MarkMessageAsRead(taskInbox, scope)
+    /\ UNCHANGED <<nextWorkerId, workerIds, taskTable, objectStore>>
+
+OnTaskReturned(owner, msg) ==
+    LET scope == msg[2] IN
+    LET retVal == msg[3] IN
+    /\ taskTable' =
+        [y \in {owner} |-> [taskTable[owner] EXCEPT !.children[scope].value = retVal]]
+        @@ taskTable
+    /\ taskInbox' = MarkMessageAsRead(taskInbox, owner)
+    /\ UNCHANGED <<nextWorkerId, workerIds, objectStore, schedulerInbox>>
+
+ProcessMessage(scope) ==
+    LET inbox == taskInbox[scope] IN
+    LET msg == Head(inbox) IN
+    LET msgTag == msg[1] IN
+    CASE msgTag = "SCHEDULED" -> OnTaskScheduled(scope, msg)
+      [] msgTag = "RETURNED" -> OnTaskReturned(scope, msg)
+      [] msgTag = "FAILED" -> OnWorkerFailed(scope, msg)
+      [] OTHER -> FALSE
+
+ProcessSomeMessage ==
+    \E scope \in DOMAIN taskInbox :
+    /\ Len(taskInbox[scope]) > 0
+    /\ ProcessMessage(scope)
+
+(***************************************************************************
+    System Steps: Failures
+ ***************************************************************************)
+
+\* TODO: Pick an owner, fail its worker, and all of its children's workers.
+
+\* A worker fails; all states and stored objects are lost.
+\* TODO: do we also set all future values that live on this worker to PENDING?
+FailWorker(id) ==
+    LET tasks_ == {task \in DOMAIN taskTable : taskTable[task].workerId /= id} IN
+    \* 1) Delete the task states that live on this worker.
+    /\ taskTable' = [task \in tasks_ |-> taskTable[task]]
+    \* 2) Delete any objects stored on this worker.
+    /\ objectStore' = [w \in DOMAIN objectStore \ {id} |-> objectStore[w]]
+    \* 3) Send a message to every task, and remove the failed task's inbox.
+    /\ taskInbox' =
+        LET msg == <<"FAILED", id>> IN
+        [task \in tasks_ |-> Append(taskInbox[task], msg)]
+    \* 4) Remove the worker ID from the set.
+    /\ workerIds' = workerIds \ {id}
+    /\ UNCHANGED <<nextWorkerId, schedulerInbox>>
+
+FailSomeWorker ==
+    LET failableWorkerIds == workerIds \ {0} IN
+    \E workerId \in failableWorkerIds :
+    FailWorker(workerId)
+
 SystemStep ==
     \/ ScheduleTask
-    \/ LaunchSomeTask
     \/ CollectSomeTaskState
     \/ CollectSomeLineage
     \/ CollectSomeValue
-
-
-(***************************************************************************
-    Failures and Recovery
- ***************************************************************************)
-
-\* TODO: what to do when this happens? Who triggers respawning of the task?
-\* A value gets lost in distributed memory store.
-LoseValue(scope, x) ==
-    LET taskState == taskTable[scope] IN
-    /\ taskState.children[x].value = "pointer"
-    /\ taskTable' =
-        [y \in {scope} |-> [taskState EXCEPT !.children[x].value = "pending"]]
-        @@ taskTable
-    /\ UNCHANGED <<schedulerInbox, taskInbox>>
-
-LoseSomeValue ==
-    \E scope \in DOMAIN taskTable :
-    \E x \in DOMAIN taskTable[scope].children :
-    LoseValue(scope, x)
-
-\* A task gets lost and respawned. This is an atomic step in this spec
-\* because otherwise the LineageInScopeInvariant would be violated.
-\* All descendants of this task also gets respawned due to fate-sharing.
-\*LoseAndRecoverTask(x) ==
-\*    /\ x /= 0
-\*    /\ systemState' = RespawnTasks(systemState, <<x>>)
-\*    /\ UNCHANGED <<functionTable, programState, futures, nextFutureId>>
-\*
-\*LoseAndRecoverSomeTask ==
-\*    \E x \in DOMAIN systemState : LoseAndRecoverTask(x)
-
-FailureStep ==
-    \/ LoseSomeValue
-\*    \/ LoseAndRecoverSomeTask
+    \/ ProcessSomeMessage
+    \/ FailSomeWorker
 
 
 (***************************************************************************
@@ -395,14 +466,12 @@ FailureStep ==
 Next ==
     \/ ProgramStep
     \/ SystemStep
-\*    \/ FailureStep
 
 Spec ==
     /\ Init
     /\ [][Next]_vars
     /\ WF_vars(ProgramStep)
     /\ WF_vars(SystemStep)
-\*    /\ WF_vars(FailureStep)
 
 
 (***************************************************************************
@@ -413,7 +482,7 @@ RECURSIVE LineageInScope(_, _)
 LineageInScope(scope, x) ==
     LET table == taskTable[scope].children IN
     /\ x \in DOMAIN table
-    /\ \/ table[x].value = "value"
+    /\ \/ table[x].value = INLINE_VALUE
        \/ \A arg \in table[x].taskSpec.args : LineageInScope(scope, arg)
 
 LineageInScopeInvariant ==
@@ -428,11 +497,11 @@ SafetyInvariant ==
 (***************************************************************************
     Temporal Properties
  ***************************************************************************)
- 
+
 AllTasksFulfilled ==
     \A scope \in DOMAIN taskTable :
     \A x \in DOMAIN taskTable[scope].children :
-    taskTable[scope].children[x].value /= "pending"
+    taskTable[scope].children[x].value /= PENDING
 
 SchedulerInboxEmpty ==
     Len(schedulerInbox) = 0
@@ -452,5 +521,5 @@ LivenessProperty ==
 
 =============================================================================
 \* Modification History
-\* Last modified Thu Aug 13 15:25:09 PDT 2020 by lsf
+\* Last modified Wed Sep 16 15:16:02 PDT 2020 by lsf
 \* Created Mon Aug 10 17:23:49 PDT 2020 by lsf
