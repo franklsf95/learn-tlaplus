@@ -427,28 +427,36 @@ ProcessSomeMessage ==
     System Steps: Failures
  ***************************************************************************)
 
-\* TODO: Pick an owner, fail its worker, and all of its children's workers.
+RECURSIVE SeqFromSet(_)
+SeqFromSet(S) ==
+    IF S = {} THEN <<>> ELSE
+    LET x == CHOOSE x \in S : TRUE IN <<x>> \o SeqFromSet(S \ {x})
 
-\* A worker fails; all states and stored objects are lost.
-\* TODO: do we also set all future values that live on this worker to PENDING?
-FailWorker(id) ==
-    LET tasks_ == {task \in DOMAIN taskTable : taskTable[task].workerId /= id} IN
+\* A set of workers fail; all states and stored objects are lost.
+FailWorkers(ids) ==
+    LET tasks_ == {task \in DOMAIN taskTable : taskTable[task].workerId \notin ids} IN
     \* 1) Delete the task states that live on this worker.
     /\ taskTable' = [task \in tasks_ |-> taskTable[task]]
     \* 2) Delete any objects stored on this worker.
-    /\ objectStore' = [w \in DOMAIN objectStore \ {id} |-> objectStore[w]]
+    /\ objectStore' = [w \in DOMAIN objectStore \ ids |-> objectStore[w]]
     \* 3) Send a message to every task, and remove the failed task's inbox.
     /\ taskInbox' =
-        LET msg == <<"FAILED", id>> IN
-        [task \in tasks_ |-> Append(taskInbox[task], msg)]
+        LET msgs == {<<"FAILED", id>> : id \in ids} IN
+        [task \in tasks_ |-> taskInbox[task] \o SeqFromSet(msgs)]
     \* 4) Remove the worker ID from the set.
-    /\ workerIds' = workerIds \ {id}
+    /\ workerIds' = workerIds \ ids
     /\ UNCHANGED <<nextWorkerId, schedulerInbox>>
 
+RECURSIVE AllDescendantWorkerIds(_)
+AllDescendantWorkerIds(scope) ==
+    LET children == {} IN
+    {taskTable[scope].workerId} \union
+    UNION {AllDescendantWorkerIds(x) : x \in children}
+
+\* Pick an owner, fail its worker, and all of its children's workers.
 FailSomeWorker ==
-    LET failableWorkerIds == workerIds \ {0} IN
-    \E workerId \in failableWorkerIds :
-    FailWorker(workerId)
+    \E scope \in DOMAIN taskTable :
+    FailWorkers(AllDescendantWorkerIds(scope))
 
 SystemStep ==
     \/ ScheduleTask
@@ -521,5 +529,5 @@ LivenessProperty ==
 
 =============================================================================
 \* Modification History
-\* Last modified Wed Sep 16 15:16:02 PDT 2020 by lsf
+\* Last modified Wed Sep 16 15:52:10 PDT 2020 by lsf
 \* Created Mon Aug 10 17:23:49 PDT 2020 by lsf
