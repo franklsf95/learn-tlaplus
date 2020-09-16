@@ -464,6 +464,8 @@ SystemStep ==
     \/ CollectSomeLineage
     \/ CollectSomeValue
     \/ ProcessSomeMessage
+
+FailureStep ==
     \/ FailSomeWorker
 
 
@@ -474,6 +476,7 @@ SystemStep ==
 Next ==
     \/ ProgramStep
     \/ SystemStep
+\*    \/ FailureStep
 
 Spec ==
     /\ Init
@@ -529,5 +532,5 @@ LivenessProperty ==
 
 =============================================================================
 \* Modification History
-\* Last modified Wed Sep 16 15:52:10 PDT 2020 by lsf
+\* Last modified Wed Sep 16 16:09:21 PDT 2020 by lsf
 \* Created Mon Aug 10 17:23:49 PDT 2020 by lsf
