@@ -101,7 +101,7 @@ TaskInboxTypeOK ==
     \A t \in DOMAIN taskInbox :
     /\ t \in Task
     /\ taskInbox[t] \in Seq(Messages)
-
+ 
 TypeOK ==
     /\ TaskTableTypeOK
     /\ ObjectStoreTypeOK
@@ -184,7 +184,7 @@ Return(scope, taskState) ==
     \* The return value could either be a literal, or stored in the worker's object store.
     \E retVal \in {INLINE_VALUE, taskState.workerId} :
     LET owner == taskTable[scope].owner IN
-    /\ taskTable' =
+    /\ taskTable' = 
         [y \in {scope} |-> [FinishExecuting(taskState) EXCEPT !.nextSteps = <<TERMINATED>>]]
         @@ taskTable
     /\ objectStore' =
@@ -241,7 +241,7 @@ PossibleNextSteps(scope, taskState) ==
 \* Prerequisite: no arguments are pending for this task.
 SubmitProgramStep(scope, taskState) ==
     \E inst \in PossibleNextSteps(scope, taskState) :
-    /\ taskTable' =
+    /\ taskTable' = 
        LET taskState_ == IF inst[1] = "CALL"
          THEN [taskState EXCEPT !.nextChildId = taskState.nextChildId + 1]
          ELSE taskState IN
@@ -260,8 +260,10 @@ SubmitSomeProgramStep ==
 \* Resolve a pending argument for a task by looking it up from the object store.
 ResolvePendingArg(scope, arg) ==
     LET taskState == taskTable[scope] IN
-    \* TODO: Should check the global object store to find value; but what about inline values?
-    /\ IsValueReady(taskTable[taskState.owner].children[arg].value)
+    LET owner == taskState.owner IN
+    /\ /\ owner \in DOMAIN taskTable
+       /\ arg \in DOMAIN taskTable[owner].children
+       /\ IsValueReady(taskTable[owner].children[arg].value)
     /\ taskTable' =
         [y \in {scope} |-> [taskState EXCEPT !.pendingArgs = taskState.pendingArgs \ {arg}]]
         @@ taskTable
@@ -346,7 +348,7 @@ CollectSomeLineage ==
     CollectLineage(scope, x)
 
 \* Checks if no one depends on x's value.
-OutOfScope(scope, x) ==
+OutOfScope(scope, x) == 
     LET taskState == taskTable[scope] IN
     LET children == taskState.children IN
     ~(
@@ -528,7 +530,7 @@ SafetyInvariant ==
 (***************************************************************************
     Temporal Properties
  ***************************************************************************)
-
+ 
 AllTasksFulfilled ==
     \A scope \in DOMAIN taskTable :
     \A x \in DOMAIN taskTable[scope].children :
@@ -551,5 +553,5 @@ LivenessProperty ==
 
 =============================================================================
 \* Modification History
-\* Last modified Thu Sep 17 15:12:42 PDT 2020 by lsf
+\* Last modified Thu Sep 17 15:15:32 PDT 2020 by lsf
 \* Created Mon Aug 10 17:23:49 PDT 2020 by lsf
