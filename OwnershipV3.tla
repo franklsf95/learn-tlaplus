@@ -1,13 +1,18 @@
 ---------------------------- MODULE OwnershipV3 ----------------------------
 EXTENDS FiniteSets, Integers, Sequences, TLC
 
-CONSTANTS MAX_CHILDREN, MAX_CALL_DEPTH
+CONSTANTS MAX_CHILDREN, MAX_CALL_DEPTH, MAX_WORKERS
 
 VARIABLES nextWorkerId, workerIds, taskTable, objectStore, schedulerInbox, taskInbox
 
 vars == <<nextWorkerId, workerIds, taskTable, objectStore, schedulerInbox, taskInbox>>
 
 ----------------------------------------------------------------------------
+
+RECURSIVE SeqFromSet(_)
+SeqFromSet(S) ==
+    IF S = {} THEN <<>> ELSE
+    LET x == CHOOSE x \in S : TRUE IN <<x>> \o SeqFromSet(S \ {x})
 
 TASK_ID_SEP == 100
 WORKER_ID_SEP == 1000
@@ -361,7 +366,8 @@ CollectSomeValue ==
 MarkMessageAsRead(inbox, scope) ==
     [inbox EXCEPT ![scope] = Tail(inbox[scope])]
 
-\* TODO: ResubmitTask()
+ScheduleTasks(inbox, tasks) ==
+    inbox \o SeqFromSet(tasks)
 
 \* Task Creation Step 3:
 \* Owner takes a task from its "scheduled" queue and launch it,
@@ -372,10 +378,11 @@ OnTaskScheduled(scope, msg) ==
     IF workerId \notin workerIds THEN
     \* The worker has failed and we need to resubmit this task.
     /\ taskTable' = taskTable
-    /\ schedulerInbox' = Append(schedulerInbox, task)
+    /\ schedulerInbox' = ScheduleTasks(schedulerInbox, {task})
     /\ taskInbox' = MarkMessageAsRead(taskInbox, scope)
     /\ UNCHANGED <<nextWorkerId, workerIds, objectStore>>
     ELSE
+    IF task.future \notin DOMAIN taskTable[scope].children THEN FALSE ELSE
     /\ \A a \in task.args : IsValueReady(taskTable[scope].children[a].value)
     /\ taskTable' =
        [y \in {task.future} |-> NewTaskState(task.owner, workerId)]
@@ -392,17 +399,14 @@ OnWorkerFailed(scope, msg) ==
     LET children == IF scope \in DOMAIN taskTable THEN taskTable[scope].children ELSE <<>> IN
     LET failedFutures == {x \in DOMAIN children : children[x].workerId = id} IN
     LET failedTasks == {children[x].taskSpec : x \in failedFutures} IN
-    /\ schedulerInbox' =
-        IF Cardinality(failedTasks) = 0 THEN schedulerInbox ELSE
-        \* TODO: figure out how to convert a set to a sequence; for now just choose the singleton.
-        LET failedTask == CHOOSE t \in failedTasks : TRUE IN
-        Append(schedulerInbox, failedTask)
+    /\ schedulerInbox' = ScheduleTasks(schedulerInbox, failedTasks)
     /\ taskInbox' = MarkMessageAsRead(taskInbox, scope)
     /\ UNCHANGED <<nextWorkerId, workerIds, taskTable, objectStore>>
 
 OnTaskReturned(owner, msg) ==
     LET scope == msg[2] IN
     LET retVal == msg[3] IN
+    IF scope \notin DOMAIN taskTable[owner].children THEN FALSE ELSE
     /\ taskTable' =
         [y \in {owner} |-> [taskTable[owner] EXCEPT !.children[scope].value = retVal]]
         @@ taskTable
@@ -427,11 +431,6 @@ ProcessSomeMessage ==
     System Steps: Failures
  ***************************************************************************)
 
-RECURSIVE SeqFromSet(_)
-SeqFromSet(S) ==
-    IF S = {} THEN <<>> ELSE
-    LET x == CHOOSE x \in S : TRUE IN <<x>> \o SeqFromSet(S \ {x})
-
 \* A set of workers fail; all states and stored objects are lost.
 FailWorkers(ids) ==
     LET tasks_ == {task \in DOMAIN taskTable : taskTable[task].workerId \notin ids} IN
@@ -455,8 +454,9 @@ AllDescendantWorkerIds(scope) ==
 
 \* Pick an owner, fail its worker, and all of its children's workers.
 FailSomeWorker ==
-    \E scope \in DOMAIN taskTable :
-    FailWorkers(AllDescendantWorkerIds(scope))
+    /\ nextWorkerId < MAX_WORKERS * WORKER_ID_SEP
+    /\ \E scope \in DOMAIN taskTable :
+       FailWorkers(AllDescendantWorkerIds(scope))
 
 SystemStep ==
     \/ ScheduleTask
@@ -476,7 +476,7 @@ FailureStep ==
 Next ==
     \/ ProgramStep
     \/ SystemStep
-\*    \/ FailureStep
+    \/ FailureStep
 
 Spec ==
     /\ Init
@@ -532,5 +532,5 @@ LivenessProperty ==
 
 =============================================================================
 \* Modification History
-\* Last modified Wed Sep 16 16:09:21 PDT 2020 by lsf
+\* Last modified Wed Sep 16 19:57:25 PDT 2020 by lsf
 \* Created Mon Aug 10 17:23:49 PDT 2020 by lsf
