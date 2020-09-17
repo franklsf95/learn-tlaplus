@@ -259,9 +259,10 @@ SubmitSomeProgramStep ==
 
 \* Resolve a pending argument for a task by looking it up from the object store.
 ResolvePendingArg(scope, arg) ==
-    /\ \E w \in DOMAIN objectStore : objectStore[w] = arg
+    LET taskState == taskTable[scope] IN
+    \* TODO: Should check the global object store to find value; but what about inline values?
+    /\ IsValueReady(taskTable[taskState.owner].children[arg].value)
     /\ taskTable' =
-        LET taskState == taskTable[scope] IN
         [y \in {scope} |-> [taskState EXCEPT !.pendingArgs = taskState.pendingArgs \ {arg}]]
         @@ taskTable
     /\ UNCHANGED <<nextWorkerId, workerIds, objectStore, schedulerInbox, taskInbox>>
@@ -550,5 +551,5 @@ LivenessProperty ==
 
 =============================================================================
 \* Modification History
-\* Last modified Thu Sep 17 14:59:01 PDT 2020 by lsf
+\* Last modified Thu Sep 17 15:07:58 PDT 2020 by lsf
 \* Created Mon Aug 10 17:23:49 PDT 2020 by lsf
