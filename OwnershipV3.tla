@@ -57,11 +57,14 @@ FutureState == [
 TaskState == [
     owner: Task,
     workerId: WorkerID,
+    pendingArgs: SUBSET Task,
     executedSteps: Seq(Instruction),
     nextSteps: Instruction,
     nextChildId: Task,
     children: [SUBSET Task -> FutureState]
 ]
+
+IsReady(taskState) == Cardinality(taskState.pendingArgs) = 0
 
 IsIdle(taskState) == Len(taskState.nextSteps) = 0
 
@@ -110,13 +113,13 @@ TypeOK ==
   The initial state contains one function: "main".
  ***************************************************************************)
 
-NewTaskState(owner, workerId) ==
-    [owner |-> owner, workerId |-> workerId, executedSteps |-> <<>>, nextSteps |-> <<>>, nextChildId |-> 1, children |-> <<>>]
+NewTaskState(owner, workerId, args) ==
+    [owner |-> owner, workerId |-> workerId, pendingArgs |-> args, executedSteps |-> <<>>, nextSteps |-> <<>>, nextChildId |-> 1, children |-> <<>>]
 
 Init ==
     /\ nextWorkerId = WORKER_ID_SEP
     /\ workerIds = {0}
-    /\ taskTable = [x \in {0} |-> NewTaskState(0, 0)]
+    /\ taskTable = [x \in {0} |-> NewTaskState(0, 0, {})]
     /\ objectStore = <<>>
     /\ schedulerInbox = <<>>
     /\ taskInbox = [x \in {0} |-> <<>>]
@@ -235,6 +238,7 @@ PossibleNextSteps(scope, taskState) ==
     }
 
 \* Submit a program step according to the current task state.
+\* Prerequisite: no arguments are pending for this task.
 SubmitProgramStep(scope, taskState) ==
     \E inst \in PossibleNextSteps(scope, taskState) :
     /\ taskTable' =
@@ -249,12 +253,28 @@ SubmitProgramStep(scope, taskState) ==
 SubmitSomeProgramStep ==
     \E scope \in DOMAIN taskTable :
     LET taskState == taskTable[scope] IN
+    /\ IsReady(taskState)
     /\ IsIdle(taskState)
     /\ SubmitProgramStep(scope, taskState)
+
+\* Resolve a pending argument for a task by looking it up from the object store.
+ResolvePendingArg(scope, arg) ==
+    /\ \E w \in DOMAIN objectStore : objectStore[w] = arg
+    /\ taskTable' =
+        LET taskState == taskTable[scope] IN
+        [y \in {scope} |-> [taskState EXCEPT !.pendingArgs = taskState.pendingArgs \ {arg}]]
+        @@ taskTable
+    /\ UNCHANGED <<nextWorkerId, workerIds, objectStore, schedulerInbox, taskInbox>>
+
+ResolveSomePendingArg ==
+    \E scope \in DOMAIN taskTable :
+    \E arg \in taskTable[scope].pendingArgs :
+    ResolvePendingArg(scope, arg)
 
 ProgramStep ==
     \/ ExecuteSomeProgramStep
     \/ SubmitSomeProgramStep
+    \/ ResolveSomePendingArg
 
 (***************************************************************************
     System Steps: Scheduler Actions
@@ -380,9 +400,8 @@ OnTaskScheduled(scope, msg) ==
     /\ UNCHANGED <<nextWorkerId, workerIds, taskTable, objectStore, schedulerInbox>>
     ELSE
     \* Launch the task.
-    /\ \A a \in task.args : IsValueReady(taskTable[scope].children[a].value)
     /\ taskTable' =
-       [y \in {task.future} |-> NewTaskState(task.owner, workerId)]
+       [y \in {task.future} |-> NewTaskState(task.owner, workerId, task.args)]
        @@ [taskTable EXCEPT ![scope].children[task.future].workerId = workerId]
     /\ taskInbox' =
        [y \in {task.future} |-> <<>>] @@ MarkMessageAsRead(taskInbox, scope)
@@ -531,5 +550,5 @@ LivenessProperty ==
 
 =============================================================================
 \* Modification History
-\* Last modified Thu Sep 17 14:20:49 PDT 2020 by lsf
+\* Last modified Thu Sep 17 14:59:01 PDT 2020 by lsf
 \* Created Mon Aug 10 17:23:49 PDT 2020 by lsf
