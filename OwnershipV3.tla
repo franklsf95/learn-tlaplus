@@ -226,13 +226,10 @@ PossibleNextSteps(scope, taskState) ==
         LET x == taskState.nextChildId IN
         \* CALL with any set of arguments.
         { CALL(x, args) : args \in SUBSET inScopes },
-
         \* GET anything that has not been gotten yet.
         { GET(x) : x \in {x \in inScopes : ~taskState.children[x].valueGotten} },
-
         \* DELETE anything that is in scope.
         { DELETE(x) : x \in inScopes },
-
         \* RETURN.
         { RETURN }
     }
@@ -295,8 +292,7 @@ CollectTaskState(scope) ==
     /\ UNCHANGED <<nextWorkerId, workerIds, objectStore, schedulerInbox>>
 
 CollectSomeTaskState ==
-    \E x \in DOMAIN taskTable :
-    CollectTaskState(x)
+    \E x \in DOMAIN taskTable : CollectTaskState(x)
 
 \* Decides if no one depends on x's value or x's lineage.
 OutOfLineageScope(scope, x) ==
@@ -363,11 +359,9 @@ CollectSomeValue ==
     System Steps: Message Handling
  ***************************************************************************)
 
-MarkMessageAsRead(inbox, scope) ==
-    [inbox EXCEPT ![scope] = Tail(inbox[scope])]
+MarkMessageAsRead(inbox, scope) == [inbox EXCEPT ![scope] = Tail(inbox[scope])]
 
-ScheduleTasks(inbox, tasks) ==
-    inbox \o SeqFromSet(tasks)
+ScheduleTasks(inbox, tasks) == inbox \o SeqFromSet(tasks)
 
 \* Task Creation Step 3:
 \* Owner takes a task from its "scheduled" queue and launch it,
@@ -377,20 +371,22 @@ OnTaskScheduled(scope, msg) ==
     LET workerId == msg[3] IN
     IF workerId \notin workerIds THEN
     \* The worker has failed and we need to resubmit this task.
-    /\ taskTable' = taskTable
     /\ schedulerInbox' = ScheduleTasks(schedulerInbox, {task})
     /\ taskInbox' = MarkMessageAsRead(taskInbox, scope)
-    /\ UNCHANGED <<nextWorkerId, workerIds, objectStore>>
+    /\ UNCHANGED <<nextWorkerId, workerIds, taskTable, objectStore>>
+    ELSE IF task.future \notin DOMAIN taskTable[scope].children THEN
+    \* This future has gone out of scope so we do not need to launch it.
+    /\ taskInbox' = MarkMessageAsRead(taskInbox, scope)
+    /\ UNCHANGED <<nextWorkerId, workerIds, taskTable, objectStore, schedulerInbox>>
     ELSE
-    IF task.future \notin DOMAIN taskTable[scope].children THEN FALSE ELSE
+    \* Launch the task.
     /\ \A a \in task.args : IsValueReady(taskTable[scope].children[a].value)
     /\ taskTable' =
        [y \in {task.future} |-> NewTaskState(task.owner, workerId)]
        @@ [taskTable EXCEPT ![scope].children[task.future].workerId = workerId]
-    /\ schedulerInbox' = schedulerInbox
     /\ taskInbox' =
        [y \in {task.future} |-> <<>>] @@ MarkMessageAsRead(taskInbox, scope)
-    /\ UNCHANGED <<nextWorkerId, workerIds, objectStore>>
+    /\ UNCHANGED <<nextWorkerId, workerIds, objectStore, schedulerInbox>>
 
 \* The owner checks if any of its children task is on the failed worker.
 \* If so, resubmit the task.
@@ -406,7 +402,11 @@ OnWorkerFailed(scope, msg) ==
 OnTaskReturned(owner, msg) ==
     LET scope == msg[2] IN
     LET retVal == msg[3] IN
-    IF scope \notin DOMAIN taskTable[owner].children THEN FALSE ELSE
+    IF scope \notin DOMAIN taskTable[owner].children THEN
+    \* This future has gone out of scope. Discard its return value.
+    /\ taskInbox' = MarkMessageAsRead(taskInbox, owner)
+    /\ UNCHANGED <<nextWorkerId, workerIds, taskTable, objectStore, schedulerInbox>>
+    ELSE
     /\ taskTable' =
         [y \in {owner} |-> [taskTable[owner] EXCEPT !.children[scope].value = retVal]]
         @@ taskTable
@@ -514,8 +514,7 @@ AllTasksFulfilled ==
     \A x \in DOMAIN taskTable[scope].children :
     taskTable[scope].children[x].value /= PENDING
 
-SchedulerInboxEmpty ==
-    Len(schedulerInbox) = 0
+SchedulerInboxEmpty == Len(schedulerInbox) = 0
 
 taskInboxEmpty ==
     \A scope \in DOMAIN taskInbox :
@@ -532,5 +531,5 @@ LivenessProperty ==
 
 =============================================================================
 \* Modification History
-\* Last modified Wed Sep 16 19:57:25 PDT 2020 by lsf
+\* Last modified Thu Sep 17 14:20:49 PDT 2020 by lsf
 \* Created Mon Aug 10 17:23:49 PDT 2020 by lsf
