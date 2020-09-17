@@ -475,7 +475,7 @@ AllDescendantWorkerIds(scope) ==
 \* Pick an owner, fail its worker, and all of its children's workers.
 FailSomeWorker ==
     /\ nextWorkerId < MAX_WORKERS * WORKER_ID_SEP
-    /\ \E scope \in DOMAIN taskTable :
+    /\ \E scope \in DOMAIN taskTable \ {0} :
        FailWorkers(AllDescendantWorkerIds(scope))
 
 SystemStep ==
@@ -551,5 +551,5 @@ LivenessProperty ==
 
 =============================================================================
 \* Modification History
-\* Last modified Thu Sep 17 15:07:58 PDT 2020 by lsf
+\* Last modified Thu Sep 17 15:12:42 PDT 2020 by lsf
 \* Created Mon Aug 10 17:23:49 PDT 2020 by lsf
